@@ -463,10 +463,12 @@ fn current_content<'a>(
         state.content_cache.insert(revision.id.clone(), content);
     }
 
-    Ok(state
-        .content_cache
-        .get(&revision.id)
-        .expect("content must be cached after loading"))
+    state.content_cache.get(&revision.id).ok_or_else(|| {
+        AdapterError::Nvim(format!(
+            "failed to cache content for revision {}",
+            revision.id
+        ))
+    })
 }
 
 fn current_revision(state: &VestigiaSession) -> Option<&Revision> {

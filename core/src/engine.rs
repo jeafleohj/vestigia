@@ -136,9 +136,13 @@ impl Engine {
             let _ = session.cache_content(content);
         }
 
-        Ok(session
-            .current_content()
-            .expect("content must be cached after loading"))
+        session.current_content().ok_or_else(|| DomainError::Git {
+            operation: "cache revision content",
+            message: format!(
+                "failed to cache content for revision {}",
+                session.current_revision().id
+            ),
+        })
     }
 
     pub fn revision_content<'a>(
@@ -156,9 +160,12 @@ impl Engine {
             let _ = session.cache_content(content);
         }
 
-        Ok(session
+        session
             .content_for_revision_id(&revision.id)
-            .expect("content must be cached after loading"))
+            .ok_or_else(|| DomainError::Git {
+                operation: "cache revision content",
+                message: format!("failed to cache content for revision {}", revision.id),
+            })
     }
 }
 
