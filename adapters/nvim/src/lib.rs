@@ -810,16 +810,31 @@ fn initialize_tracing() {
             .expect("Vestigia log path should always have a file name"),
     );
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+    let max_level = env::var("VESTIGIA_LOG")
+        .ok()
+        .and_then(|value| parse_log_level(&value))
+        .unwrap_or(tracing::Level::INFO);
 
     let _ = LOG_GUARD.set(guard);
     let _ = tracing_subscriber::fmt()
         .with_writer(non_blocking)
         .with_ansi(false)
         .with_target(true)
-        .with_max_level(tracing::Level::DEBUG)
+        .with_max_level(max_level)
         .try_init();
 }
 
 fn vestigia_log_path() -> &'static PathBuf {
     LOG_PATH.get_or_init(|| env::temp_dir().join("vestigia").join("vestigia-nvim.log"))
+}
+
+fn parse_log_level(raw: &str) -> Option<tracing::Level> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "error" => Some(tracing::Level::ERROR),
+        "warn" | "warning" => Some(tracing::Level::WARN),
+        "info" => Some(tracing::Level::INFO),
+        "debug" => Some(tracing::Level::DEBUG),
+        "trace" => Some(tracing::Level::TRACE),
+        _ => None,
+    }
 }
