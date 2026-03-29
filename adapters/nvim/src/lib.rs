@@ -15,7 +15,7 @@ use oxi::{
     api::{
         self, Buffer,
         opts::CreateCommandOptsBuilder,
-        types::{CommandArgs, CommandNArgs},
+        types::{CommandArgs, CommandComplete, CommandNArgs},
     },
 };
 use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
@@ -28,6 +28,7 @@ type AdapterResult<T> = std::result::Result<T, AdapterError>;
 const HISTORY_BATCH_SIZE: usize = 32;
 
 static ACTIVE_SESSION: OnceLock<Mutex<Option<VestigiaSession>>> = OnceLock::new();
+const HISTORY_MODE_NAMES: [&str; 3] = ["fast", "full-history", "full-history-no-merges"];
 
 enum WorkerMessage {
     Batch(Vec<Revision>),
@@ -60,6 +61,7 @@ fn vestigia_nvim() -> Result<()> {
     let open_opts = CreateCommandOptsBuilder::default()
         .desc("Open Git file history with Vestigia")
         .nargs(CommandNArgs::ZeroOrOne)
+        .complete(CommandComplete::CustomList(complete_history_modes.into()))
         .build();
     let prev_opts = CreateCommandOptsBuilder::default()
         .desc("Show the previous Git revision for the active Vestigia session")
@@ -486,6 +488,17 @@ fn parse_history_mode_arg(args: &CommandArgs) -> AdapterResult<HistoryMode> {
             "invalid history mode `{other}`; expected fast, full-history, or full-history-no-merges"
         ))),
     }
+}
+
+fn complete_history_modes(
+    (arg_lead, _cmdline, _cursor_pos): (String, String, usize),
+) -> Vec<String> {
+    HISTORY_MODE_NAMES
+        .iter()
+        .copied()
+        .filter(|mode| mode.starts_with(arg_lead.as_str()))
+        .map(str::to_owned)
+        .collect()
 }
 
 fn render_mode(mode: HistoryMode) -> &'static str {
