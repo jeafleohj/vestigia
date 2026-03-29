@@ -216,10 +216,12 @@ fn show_revision_metadata(_args: CommandArgs) -> Result<()> {
         api::command("botright new").map_err(nvim_error)?;
         let mut scratch = Buffer::current();
         api::command("setlocal buftype=nofile bufhidden=wipe noswapfile").map_err(nvim_error)?;
+        api::command("setlocal nobuflisted").map_err(nvim_error)?;
         api::command("setlocal modifiable").map_err(nvim_error)?;
         scratch.set_lines(0..0, true, lines).map_err(nvim_error)?;
         api::command("setlocal nomodified").map_err(nvim_error)?;
         api::command("setlocal nomodifiable").map_err(nvim_error)?;
+        api::command("nnoremap <silent> <buffer> q <Cmd>bwipeout!<CR>").map_err(nvim_error)?;
         api::command(&format!("file vestigia-meta://{}", revision.short_id)).map_err(nvim_error)?;
 
         Ok(())
