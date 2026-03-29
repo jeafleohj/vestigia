@@ -48,6 +48,7 @@ struct VestigiaSession {
     target_file: PathBuf,
     repo_relative_path: RepoRelativePath,
     scratch: Buffer,
+    metadata: Option<Buffer>,
     revisions: Vec<Revision>,
     current_index: Option<usize>,
     content_cache: HashMap<RevisionId, RevisionContent>,
@@ -124,6 +125,7 @@ fn run_vestigia(mode: HistoryMode) -> AdapterResult<()> {
         target_file: file_path.clone(),
         repo_relative_path,
         scratch,
+        metadata: None,
         revisions: Vec::new(),
         current_index: None,
         content_cache: HashMap::new(),
@@ -182,49 +184,13 @@ fn open_next_revision(_args: CommandArgs) -> Result<()> {
 
 fn show_revision_metadata(_args: CommandArgs) -> Result<()> {
     if let Err(error) = with_active_session(|state| {
-        let Some(revision) = current_revision(state) else {
+        if current_revision(state).is_none() {
             api::err_writeln("Vestigia: history still loading");
             return Ok(());
-        };
-
-        let mut lines = vec![
-            format!("mode: {}", render_mode(state.mode)),
-            format!("history: {}", render_history_summary(state)),
-            format!("index: {}", display_revision_position(revision)),
-            format!("id: {}", revision.id),
-            format!("short: {}", revision.short_id),
-            format!("author: {}", revision.author_name.as_str()),
-        ];
-
-        if let Some(email) = &revision.author_email {
-            lines.push(format!("email: {}", email.as_str()));
         }
 
-        lines.push(format!(
-            "author_date: {}",
-            format_utc_datetime(revision.author_time.seconds(),)
-        ));
-        lines.push(format!(
-            "commit_date: {}",
-            format_utc_datetime(revision.commit_time.seconds(),)
-        ));
-        lines.push(format!("summary: {}", revision.summary.as_str()));
-        lines.push(String::new());
-        lines.push("message:".to_owned());
-        lines.extend(revision.message.as_str().lines().map(str::to_owned));
-
-        api::command("botright new").map_err(nvim_error)?;
-        let mut scratch = Buffer::current();
-        api::command("setlocal buftype=nofile bufhidden=wipe noswapfile").map_err(nvim_error)?;
-        api::command("setlocal nobuflisted").map_err(nvim_error)?;
-        api::command("setlocal modifiable").map_err(nvim_error)?;
-        scratch.set_lines(0..0, true, lines).map_err(nvim_error)?;
-        api::command("setlocal nomodified").map_err(nvim_error)?;
-        api::command("setlocal nomodifiable").map_err(nvim_error)?;
-        api::command("nnoremap <silent> <buffer> q <Cmd>bwipeout!<CR>").map_err(nvim_error)?;
-        api::command(&format!("file vestigia-meta://{}", revision.short_id)).map_err(nvim_error)?;
-
-        Ok(())
+        let metadata = open_or_reuse_metadata_window(state)?;
+        render_metadata(state, &metadata)
     }) {
         api::err_writeln(&render_adapter_error(&error));
     }
@@ -426,6 +392,62 @@ fn render_state(state: &mut VestigiaSession) -> AdapterResult<()> {
         })
         .map_err(nvim_error)?;
 
+    if let Some(metadata) = state
+        .metadata
+        .as_ref()
+        .filter(|buffer| buffer.is_valid())
+        .cloned()
+    {
+        render_metadata(state, &metadata)?;
+    }
+
+    Ok(())
+}
+
+fn render_metadata(state: &VestigiaSession, metadata: &Buffer) -> AdapterResult<()> {
+    let Some(revision) = current_revision(state) else {
+        return Ok(());
+    };
+
+    let mut lines = vec![
+        format!("mode: {}", render_mode(state.mode)),
+        format!("history: {}", render_history_summary(state)),
+        format!("index: {}", display_revision_position(revision)),
+        format!("id: {}", revision.id),
+        format!("short: {}", revision.short_id),
+        format!("author: {}", revision.author_name.as_str()),
+    ];
+
+    if let Some(email) = &revision.author_email {
+        lines.push(format!("email: {}", email.as_str()));
+    }
+
+    lines.push(format!(
+        "author_date: {}",
+        format_utc_datetime(revision.author_time.seconds(),)
+    ));
+    lines.push(format!(
+        "commit_date: {}",
+        format_utc_datetime(revision.commit_time.seconds(),)
+    ));
+    lines.push(format!("summary: {}", revision.summary.as_str()));
+    lines.push(String::new());
+    lines.push("message:".to_owned());
+    lines.extend(revision.message.as_str().lines().map(str::to_owned));
+
+    let buffer_name = format!("vestigia-meta://{}", revision.short_id);
+    let mut metadata_for_call = metadata.clone();
+    metadata
+        .call::<_, _, ()>(move |_| -> Result<()> {
+            api::command("setlocal modifiable")?;
+            metadata_for_call.set_lines(.., true, lines)?;
+            api::command("setlocal nomodified")?;
+            api::command("setlocal nomodifiable")?;
+            metadata_for_call.set_name(buffer_name)?;
+            Ok(())
+        })
+        .map_err(nvim_error)?;
+
     Ok(())
 }
 
@@ -550,6 +572,34 @@ fn open_or_reuse_scratch_window() -> AdapterResult<Buffer> {
     api::command("botright new").map_err(nvim_error)?;
     api::set_current_buf(&scratch).map_err(nvim_error)?;
     Ok(scratch)
+}
+
+fn open_or_reuse_metadata_window(state: &mut VestigiaSession) -> AdapterResult<Buffer> {
+    if let Some(metadata) = state
+        .metadata
+        .as_ref()
+        .filter(|buffer| buffer.is_valid())
+        .cloned()
+    {
+        if let Some(window) = find_window_for_buffer(&metadata)? {
+            api::set_current_win(&window).map_err(nvim_error)?;
+            return Ok(metadata);
+        }
+
+        api::command("botright new").map_err(nvim_error)?;
+        api::set_current_buf(&metadata).map_err(nvim_error)?;
+        return Ok(metadata);
+    }
+
+    api::command("botright new").map_err(nvim_error)?;
+    let metadata = Buffer::current();
+    api::command("setlocal buftype=nofile bufhidden=hide noswapfile").map_err(nvim_error)?;
+    api::command("setlocal nobuflisted").map_err(nvim_error)?;
+    api::command("setlocal modifiable").map_err(nvim_error)?;
+    api::command("setlocal nomodifiable").map_err(nvim_error)?;
+    api::command("nnoremap <silent> <buffer> q <Cmd>close<CR>").map_err(nvim_error)?;
+    state.metadata = Some(metadata.clone());
+    Ok(metadata)
 }
 
 fn active_scratch_buffer() -> AdapterResult<Option<Buffer>> {
