@@ -5,3 +5,6 @@ edition = "2024"
 license.workspace = true
 
 [dependencies]
+git2 = { version = "0.20.4", default-features = false, features = [
+  "vendored-libgit2"
+] }
