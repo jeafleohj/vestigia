@@ -13,7 +13,7 @@ use nvim_oxi::{libuv::AsyncHandle, schedule};
 use oxi::{
     Result,
     api::{
-        self, Buffer,
+        self, Buffer, Window,
         opts::CreateCommandOptsBuilder,
         types::{CommandArgs, CommandComplete, CommandNArgs},
     },
@@ -105,7 +105,7 @@ fn run_vestigia(mode: HistoryMode) -> AdapterResult<()> {
         .resolve_file_path(&file_path)
         .map_err(AdapterError::Domain)?;
 
-    let scratch = open_scratch_window()?;
+    let scratch = open_or_reuse_scratch_window()?;
     let (update_tx, update_rx) = mpsc::channel();
     let handle = AsyncHandle::new(|| {
         schedule(|_| {
@@ -218,6 +218,7 @@ fn show_revision_metadata(_args: CommandArgs) -> Result<()> {
         api::command("setlocal buftype=nofile bufhidden=wipe noswapfile").map_err(nvim_error)?;
         api::command("setlocal modifiable").map_err(nvim_error)?;
         scratch.set_lines(0..0, true, lines).map_err(nvim_error)?;
+        api::command("setlocal nomodified").map_err(nvim_error)?;
         api::command("setlocal nomodifiable").map_err(nvim_error)?;
         api::command(&format!("file vestigia-meta://{}", revision.short_id)).map_err(nvim_error)?;
 
@@ -415,6 +416,7 @@ fn render_state(state: &mut VestigiaSession) -> AdapterResult<()> {
         .call::<_, _, ()>(move |_| -> Result<()> {
             api::command("setlocal modifiable")?;
             buffer_for_call.set_lines(.., true, lines)?;
+            api::command("setlocal nomodified")?;
             api::command("setlocal nomodifiable")?;
             buffer_for_call.set_name(buffer_name)?;
             api::command(&format!("let &l:winbar = '{escaped}'"))?;
@@ -523,7 +525,7 @@ fn format_utc_datetime(seconds: i64) -> String {
 
 fn open_scratch_window() -> AdapterResult<Buffer> {
     api::command("botright new").map_err(nvim_error)?;
-    api::command("setlocal buftype=nofile bufhidden=wipe noswapfile").map_err(nvim_error)?;
+    api::command("setlocal buftype=nofile bufhidden=hide noswapfile").map_err(nvim_error)?;
     api::command("setlocal modifiable").map_err(nvim_error)?;
     api::command("setlocal nomodifiable").map_err(nvim_error)?;
     api::command("nnoremap <silent> <buffer> [h <Cmd>VestigiaPrev<CR>").map_err(nvim_error)?;
@@ -531,6 +533,46 @@ fn open_scratch_window() -> AdapterResult<Buffer> {
     api::command("nnoremap <silent> <buffer> gm <Cmd>VestigiaMeta<CR>").map_err(nvim_error)?;
     api::command("nnoremap <silent> <buffer> q <Cmd>close<CR>").map_err(nvim_error)?;
     Ok(Buffer::current())
+}
+
+fn open_or_reuse_scratch_window() -> AdapterResult<Buffer> {
+    let Some(scratch) = active_scratch_buffer()? else {
+        return open_scratch_window();
+    };
+
+    if let Some(window) = find_window_for_buffer(&scratch)? {
+        api::set_current_win(&window).map_err(nvim_error)?;
+        return Ok(scratch);
+    }
+
+    api::command("botright new").map_err(nvim_error)?;
+    api::set_current_buf(&scratch).map_err(nvim_error)?;
+    Ok(scratch)
+}
+
+fn active_scratch_buffer() -> AdapterResult<Option<Buffer>> {
+    let session = active_session_slot();
+    let guard = session
+        .lock()
+        .map_err(|_| AdapterError::Nvim("failed to lock active Vestigia session".to_owned()))?;
+
+    Ok(guard
+        .as_ref()
+        .and_then(|state| state.scratch.is_valid().then(|| state.scratch.clone())))
+}
+
+fn find_window_for_buffer(buffer: &Buffer) -> AdapterResult<Option<Window>> {
+    for window in api::list_wins() {
+        let Ok(window_buffer) = window.get_buf() else {
+            continue;
+        };
+
+        if window_buffer == *buffer {
+            return Ok(Some(window));
+        }
+    }
+
+    Ok(None)
 }
 
 fn replace_active_session(state: VestigiaSession) -> AdapterResult<()> {
