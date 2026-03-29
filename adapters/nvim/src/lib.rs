@@ -188,7 +188,7 @@ fn show_revision_metadata(_args: CommandArgs) -> Result<()> {
         let mut lines = vec![
             format!("mode: {}", render_mode(state.mode)),
             format!("history: {}", render_history_summary(state)),
-            format!("index: {}", revision.index.get()),
+            format!("index: {}", display_revision_position(revision)),
             format!("id: {}", revision.id),
             format!("short: {}", revision.short_id),
             format!("author: {}", revision.author_name.as_str()),
@@ -373,7 +373,7 @@ fn render_state(state: &mut VestigiaSession) -> AdapterResult<()> {
             let title = format!(
                 "Vestigia [{}] [{} / {}] {} {} {}",
                 render_mode(state.mode),
-                revision.index.get(),
+                display_revision_position(&revision),
                 history_status_label(state),
                 revision.short_id,
                 revision.author_name.as_str(),
@@ -453,6 +453,10 @@ fn history_status_label(state: &VestigiaSession) -> String {
     } else {
         format!("{}+", state.revisions.len())
     }
+}
+
+fn display_revision_position(revision: &Revision) -> usize {
+    revision.index.get() + 1
 }
 
 fn render_history_summary(state: &VestigiaSession) -> String {
