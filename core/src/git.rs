@@ -276,7 +276,7 @@ fn stream_git_history(
     mode: HistoryMode,
     mut on_record: impl FnMut(GitLogRecord) -> DomainResult<()>,
 ) -> DomainResult<()> {
-    let format = format!("%H%x00%h%x00%an%x00%ae%x00%at%x00%ai%x00%ct%x00%cI%x00%s%x00");
+    let format = "%H%x00%h%x00%an%x00%ae%x00%at%x00%ai%x00%ct%x00%cI%x00%s%x00".to_string();
     let output = Command::new("git")
         .current_dir(repo_root.as_path())
         .arg("log")
@@ -373,7 +373,7 @@ fn consume_git_log_output(
             continue;
         }
 
-        on_record(GitLogRecord::parse(&raw_record)?)?;
+        on_record(GitLogRecord::parse(raw_record)?)?;
     }
 
     let mut stderr_buffer = String::new();
@@ -726,7 +726,8 @@ mod tests {
 
     #[test]
     fn git_log_record_parse_tolerates_prefixed_newlines_between_records() {
-        let raw = "\nfa896c9462cf3f7b525ed2bf03e2899f249e3501\0fa896c9462cf\0Sandro\0sandro@example.com\01774538064\02026-03-26 15:14:24 +0000\01774538064\02026-03-26T15:14:24Z\0osmium: init at 0.0.16 (#497201)";
+        let raw = r#"
+fa896c9462cf3f7b525ed2bf03e2899f249e3501 fa896c9462cf Sandro sandro@example.com 1774538064 2026-03-26 15:14:24 +0000 1774538064 2026-03-26T15:14:24Z osmium: init at 0.0.16 (#497201)"#;
         let record = GitLogRecord::parse(raw.trim_start_matches(['\n', '\r'])).unwrap();
 
         assert_eq!(record.id, "fa896c9462cf3f7b525ed2bf03e2899f249e3501");
