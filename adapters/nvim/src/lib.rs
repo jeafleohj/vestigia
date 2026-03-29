@@ -9,7 +9,10 @@ use std::{
     thread,
 };
 
-use nvim_oxi as oxi;
+use nvim_oxi::{
+    self as oxi,
+    api::{opts::OptionOptsBuilder, set_option_value},
+};
 use nvim_oxi::{libuv::AsyncHandle, schedule};
 use oxi::{
     Result,
@@ -119,6 +122,7 @@ fn run_vestigia(mode: HistoryMode) -> AdapterResult<()> {
         .map_err(AdapterError::Domain)?;
 
     let scratch = open_or_reuse_scratch_window()?;
+    let metadata = active_metadata_buffer()?;
     let (update_tx, update_rx) = mpsc::channel();
     let handle = AsyncHandle::new(|| {
         schedule(|_| {
@@ -137,7 +141,7 @@ fn run_vestigia(mode: HistoryMode) -> AdapterResult<()> {
         target_file: file_path.clone(),
         repo_relative_path,
         scratch,
-        metadata: None,
+        metadata,
         revisions: Vec::new(),
         current_index: None,
         content_cache: HashMap::new(),
@@ -427,19 +431,8 @@ fn render_state(state: &mut VestigiaSession) -> AdapterResult<()> {
         }
     };
 
-    let escaped = title.replace('\'', "''");
-    let mut buffer_for_call = scratch.clone();
-    scratch
-        .call::<_, _, ()>(move |_| -> Result<()> {
-            api::command("setlocal modifiable")?;
-            buffer_for_call.set_lines(.., true, lines)?;
-            api::command("setlocal nomodified")?;
-            api::command("setlocal nomodifiable")?;
-            buffer_for_call.set_name(buffer_name)?;
-            api::command(&format!("let &l:winbar = '{escaped}'"))?;
-            Ok(())
-        })
-        .map_err(nvim_error)?;
+    render_buffer_content(&scratch, lines, buffer_name)?;
+    update_window_winbar(&scratch, &title)?;
 
     if let Some(metadata) = state
         .metadata
@@ -485,17 +478,7 @@ fn render_metadata(state: &VestigiaSession, metadata: &Buffer) -> AdapterResult<
     lines.extend(revision.message.as_str().lines().map(str::to_owned));
 
     let buffer_name = format!("vestigia-meta://{}", revision.short_id);
-    let mut metadata_for_call = metadata.clone();
-    metadata
-        .call::<_, _, ()>(move |_| -> Result<()> {
-            api::command("setlocal modifiable")?;
-            metadata_for_call.set_lines(.., true, lines)?;
-            api::command("setlocal nomodified")?;
-            api::command("setlocal nomodifiable")?;
-            metadata_for_call.set_name(buffer_name)?;
-            Ok(())
-        })
-        .map_err(nvim_error)?;
+    render_buffer_content(metadata, lines, buffer_name)?;
 
     Ok(())
 }
@@ -665,6 +648,21 @@ fn active_scratch_buffer() -> AdapterResult<Option<Buffer>> {
         .and_then(|state| state.scratch.is_valid().then(|| state.scratch.clone())))
 }
 
+fn active_metadata_buffer() -> AdapterResult<Option<Buffer>> {
+    let session = active_session_slot();
+    let guard = session
+        .lock()
+        .map_err(|_| AdapterError::Nvim("failed to lock active Vestigia session".to_owned()))?;
+
+    Ok(guard.as_ref().and_then(|state| {
+        state
+            .metadata
+            .as_ref()
+            .filter(|buffer| buffer.is_valid())
+            .cloned()
+    }))
+}
+
 fn find_window_for_buffer(buffer: &Buffer) -> AdapterResult<Option<Window>> {
     for window in api::list_wins() {
         let Ok(window_buffer) = window.get_buf() else {
@@ -677,6 +675,34 @@ fn find_window_for_buffer(buffer: &Buffer) -> AdapterResult<Option<Window>> {
     }
 
     Ok(None)
+}
+
+fn render_buffer_content(
+    buffer: &Buffer,
+    lines: Vec<String>,
+    buffer_name: String,
+) -> AdapterResult<()> {
+    let opts = OptionOptsBuilder::default().buffer(buffer.clone()).build();
+
+    set_option_value("modifiable", true, &opts).map_err(nvim_error)?;
+    buffer
+        .clone()
+        .set_lines(.., true, lines)
+        .map_err(nvim_error)?;
+    set_option_value("modified", false, &opts).map_err(nvim_error)?;
+    set_option_value("modifiable", false, &opts).map_err(nvim_error)?;
+    buffer.clone().set_name(buffer_name).map_err(nvim_error)?;
+
+    Ok(())
+}
+
+fn update_window_winbar(buffer: &Buffer, title: &str) -> AdapterResult<()> {
+    if let Some(window) = find_window_for_buffer(buffer)? {
+        let opts = OptionOptsBuilder::default().win(window.clone()).build();
+        set_option_value("winbar", title, &opts).map_err(nvim_error)?;
+    }
+
+    Ok(())
 }
 
 fn replace_active_session(state: VestigiaSession) -> AdapterResult<()> {
