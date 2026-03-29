@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    env,
     path::PathBuf,
     sync::{
         Mutex, OnceLock,
@@ -19,6 +20,8 @@ use oxi::{
     },
 };
 use time::{OffsetDateTime, UtcOffset, format_description::well_known::Rfc3339};
+use tracing::{debug, error, info, warn};
+use tracing_appender::non_blocking::WorkerGuard;
 use vestigia_core::{
     DomainError, Engine, HistoryMode, RepoRelativePath, Revision, RevisionContent, RevisionId,
 };
@@ -28,6 +31,8 @@ type AdapterResult<T> = std::result::Result<T, AdapterError>;
 const HISTORY_BATCH_SIZE: usize = 32;
 
 static ACTIVE_SESSION: OnceLock<Mutex<Option<VestigiaSession>>> = OnceLock::new();
+static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
+static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 const HISTORY_MODE_NAMES: [&str; 3] = ["fast", "full-history", "full-history-no-merges"];
 
 enum WorkerMessage {
@@ -73,11 +78,17 @@ fn vestigia_nvim() -> Result<()> {
     let meta_opts = CreateCommandOptsBuilder::default()
         .desc("Show metadata for the active Vestigia revision")
         .build();
+    let open_log_opts = CreateCommandOptsBuilder::default()
+        .desc("Open the Vestigia Neovim adapter log")
+        .build();
+
+    initialize_tracing();
 
     api::create_user_command("Vestigia", open_vestigia, &open_opts)?;
     api::create_user_command("VestigiaPrev", open_previous_revision, &prev_opts)?;
     api::create_user_command("VestigiaNext", open_next_revision, &next_opts)?;
     api::create_user_command("VestigiaMeta", show_revision_metadata, &meta_opts)?;
+    api::create_user_command("VestigiaOpenLog", open_vestigia_log, &open_log_opts)?;
 
     Ok(())
 }
@@ -101,6 +112,7 @@ fn open_vestigia(args: CommandArgs) -> Result<()> {
 fn run_vestigia(mode: HistoryMode) -> AdapterResult<()> {
     let current = Buffer::current();
     let file_path = current_file_path(&current)?;
+    info!(mode = render_mode(mode), file = %file_path.display(), "opening Vestigia session");
     let engine = Engine::open_repository(&file_path).map_err(AdapterError::Domain)?;
     let (_, repo_relative_path) = engine
         .resolve_file_path(&file_path)
@@ -144,6 +156,10 @@ fn open_previous_revision(_args: CommandArgs) -> Result<()> {
     if let Err(error) = with_active_session(|state| match state.current_index {
         Some(index) if index + 1 < state.revisions.len() => {
             state.current_index = Some(index + 1);
+            debug!(
+                index = state.current_index.unwrap_or_default(),
+                "moved to older revision"
+            );
             render_state(state)
         }
         Some(_) if state.loading_complete => {
@@ -165,6 +181,10 @@ fn open_next_revision(_args: CommandArgs) -> Result<()> {
     if let Err(error) = with_active_session(|state| match state.current_index {
         Some(index) if index > 0 => {
             state.current_index = Some(index - 1);
+            debug!(
+                index = state.current_index.unwrap_or_default(),
+                "moved to newer revision"
+            );
             render_state(state)
         }
         Some(_) => {
@@ -190,11 +210,20 @@ fn show_revision_metadata(_args: CommandArgs) -> Result<()> {
         }
 
         let metadata = open_or_reuse_metadata_window(state)?;
+        debug!("opened or focused metadata buffer");
         render_metadata(state, &metadata)
     }) {
         api::err_writeln(&render_adapter_error(&error));
     }
 
+    Ok(())
+}
+
+fn open_vestigia_log(_args: CommandArgs) -> Result<()> {
+    let path = vestigia_log_path();
+    if let Err(error) = api::command(&format!("edit {}", path.display())) {
+        api::err_writeln(&format!("Vestigia: failed to open log: {}", error));
+    }
     Ok(())
 }
 
@@ -205,12 +234,14 @@ fn run_history_worker(
     update_tx: Sender<WorkerMessage>,
     update_handle: AsyncHandle,
 ) {
+    info!(mode = render_mode(mode), file = %file_path.display(), "starting history worker");
     let mut batch = Vec::with_capacity(HISTORY_BATCH_SIZE);
     let mut sent_first_revision = false;
 
     let result = engine.scan_file_history_with_mode(&file_path, mode, |revision| {
         if !sent_first_revision {
             sent_first_revision = true;
+            debug!(revision = %revision.id, "sending first revision");
             send_worker_message(
                 &update_tx,
                 &update_handle,
@@ -231,12 +262,18 @@ fn run_history_worker(
     flush_batch(&update_tx, &update_handle, &mut batch);
 
     match result {
-        Ok(_) => send_worker_message(&update_tx, &update_handle, WorkerMessage::Finished),
-        Err(error) => send_worker_message(
-            &update_tx,
-            &update_handle,
-            WorkerMessage::Failed(render_domain_error(&error)),
-        ),
+        Ok(_) => {
+            info!("history worker finished successfully");
+            send_worker_message(&update_tx, &update_handle, WorkerMessage::Finished)
+        }
+        Err(error) => {
+            error!(error = %render_domain_error(&error), "history worker failed");
+            send_worker_message(
+                &update_tx,
+                &update_handle,
+                WorkerMessage::Failed(render_domain_error(&error)),
+            )
+        }
     }
 }
 
@@ -260,6 +297,8 @@ fn send_worker_message(
 ) {
     if update_tx.send(message).is_ok() {
         let _ = update_handle.send();
+    } else {
+        warn!("failed to send worker message to UI thread");
     }
 }
 
@@ -286,20 +325,24 @@ fn process_worker_updates() -> AdapterResult<()> {
                     state.current_index = Some(0);
                 }
 
+                debug!(count = revisions.len(), "received revision batch");
                 state.revisions.append(&mut revisions);
                 changed = true;
             }
             Ok(WorkerMessage::Finished) => {
+                info!(loaded = state.revisions.len(), "history loading completed");
                 state.loading_complete = true;
                 changed = true;
             }
             Ok(WorkerMessage::Failed(message)) => {
+                error!(%message, "history loading failed");
                 state.loading_complete = true;
                 state.loading_error = Some(message);
                 changed = true;
             }
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {
+                warn!("history worker channel disconnected");
                 state.loading_complete = true;
                 changed = true;
                 break;
@@ -460,6 +503,7 @@ fn current_content<'a>(
             .engine
             .load_revision_content(&state.repo_relative_path, &revision.id)
             .map_err(AdapterError::Domain)?;
+        debug!(revision = %revision.id, "loaded revision content");
         state.content_cache.insert(revision.id.clone(), content);
     }
 
@@ -744,4 +788,32 @@ fn render_adapter_error(error: &AdapterError) -> String {
 
 fn nvim_error<E: ToString>(error: E) -> AdapterError {
     AdapterError::Nvim(error.to_string())
+}
+
+fn initialize_tracing() {
+    let path = vestigia_log_path();
+    let _ = std::fs::create_dir_all(
+        path.parent()
+            .expect("Vestigia log path should always have a parent directory"),
+    );
+
+    let file_appender = tracing_appender::rolling::never(
+        path.parent()
+            .expect("Vestigia log path should always have a parent directory"),
+        path.file_name()
+            .expect("Vestigia log path should always have a file name"),
+    );
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
+    let _ = LOG_GUARD.set(guard);
+    let _ = tracing_subscriber::fmt()
+        .with_writer(non_blocking)
+        .with_ansi(false)
+        .with_target(false)
+        .with_max_level(tracing::Level::DEBUG)
+        .try_init();
+}
+
+fn vestigia_log_path() -> &'static PathBuf {
+    LOG_PATH.get_or_init(|| env::temp_dir().join("vestigia").join("vestigia-nvim.log"))
 }
