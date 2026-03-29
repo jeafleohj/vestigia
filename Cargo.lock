@@ -361,6 +361,76 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6673768db2d862beb9b39a78fdcb1a69439615d5794a1be50caa9bc92c81967"
 
 [[package]]
+name = "nvim-oxi"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54489e0e1515ff8fdbd07eb198ac1f8b082b849e2ed3b7607d6705e24b74af5c"
+dependencies = [
+ "nvim-oxi-api",
+ "nvim-oxi-libuv",
+ "nvim-oxi-luajit",
+ "nvim-oxi-macros",
+ "nvim-oxi-types",
+ "thiserror",
+]
+
+[[package]]
+name = "nvim-oxi-api"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89a662cfeae9de93b4a6a1779e9e37e15c354f8f9acc933e2d79105d601c8fd4"
+dependencies = [
+ "nvim-oxi-luajit",
+ "nvim-oxi-macros",
+ "nvim-oxi-types",
+ "serde",
+ "serde_repr",
+ "thiserror",
+]
+
+[[package]]
+name = "nvim-oxi-libuv"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91360300b2f7e0d1aaf4fe42d06ec9096a21d4162614e601029e78f583d83203"
+dependencies = [
+ "nvim-oxi-luajit",
+ "thiserror",
+]
+
+[[package]]
+name = "nvim-oxi-luajit"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bba46ec2ab57e840cd33067e0d1d7c89c2c7feafd02bbbb11a90a4220491a1c9"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
+name = "nvim-oxi-macros"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0c03daabc1d9efd2d5aff2746199b4ed60f2cc24c321d6fcb2aa023169b0f13"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "nvim-oxi-types"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f079f687853419cf83879ab060d23171e31689d090a0c8d5c6aa0e3210c83ec"
+dependencies = [
+ "libc",
+ "nvim-oxi-luajit",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -424,6 +494,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
+ "serde_derive",
 ]
 
 [[package]]
@@ -440,6 +511,17 @@ name = "serde_derive"
 version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "serde_repr"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "175ee3e80ae9982737ca543e96133087cbd9a485eecc3bc4de9c1a37b47ea59c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -486,6 +568,26 @@ name = "synstructure"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "728a70f3dbaf5bab7f0c4b1ac8d7ae5ea60a4b5549c8a5914361c99147a709d2"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "thiserror"
+version = "2.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
+dependencies = [
+ "thiserror-impl",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "2.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -588,6 +690,11 @@ dependencies = [
 [[package]]
 name = "vestigia-nvim"
 version = "0.1.0"
+dependencies = [
+ "nvim-oxi",
+ "time",
+ "vestigia-core",
+]
 
 [[package]]
 name = "wasip2"
