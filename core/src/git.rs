@@ -5,6 +5,7 @@ use std::{
 };
 
 use git2::{Oid, Repository};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     content::RevisionContent,
@@ -78,6 +79,13 @@ pub fn scan_file_history_with_mode(
     mode: HistoryMode,
     mut on_revision: impl FnMut(Revision) -> DomainResult<()>,
 ) -> DomainResult<usize> {
+    info!(
+        target: "vestigia.core.git",
+        mode = ?mode,
+        repo_root = %repo_root.as_path().display(),
+        path = %repo_relative_path.as_path().display(),
+        "scanning file history"
+    );
     let mut count = 0;
 
     stream_git_history(repo_root, repo_relative_path, mode, |record| {
@@ -86,6 +94,7 @@ pub fn scan_file_history_with_mode(
         Ok(())
     })?;
 
+    info!(target: "vestigia.core.git", revisions = count, "finished scanning file history");
     Ok(count)
 }
 
@@ -147,6 +156,13 @@ pub fn load_revision_content(
     repo_relative_path: &RepoRelativePath,
     revision_id: &RevisionId,
 ) -> DomainResult<RevisionContent> {
+    debug!(
+        target: "vestigia.core.git",
+        repo_root = %repo_root.as_path().display(),
+        path = %repo_relative_path.as_path().display(),
+        revision = %revision_id,
+        "loading revision content"
+    );
     let repository = Repository::open(repo_root.as_path())
         .map_err(|error| git_error("open repository", error))?;
     let oid = Oid::from_str(revision_id.as_str())
@@ -161,6 +177,12 @@ pub fn load_revision_content(
     let entry = match tree.get_path(repo_relative_path.as_path()) {
         Ok(entry) => entry,
         Err(_) => {
+            debug!(
+                target: "vestigia.core.git",
+                path = %repo_relative_path.as_path().display(),
+                revision = %revision_id,
+                "path is deleted in revision"
+            );
             return Ok(RevisionContent::Deleted {
                 revision_id: revision_id.clone(),
             });
@@ -170,6 +192,13 @@ pub fn load_revision_content(
     let object = match entry.to_object(&repository) {
         Ok(object) => object,
         Err(error) => {
+            warn!(
+                target: "vestigia.core.git",
+                path = %repo_relative_path.as_path().display(),
+                revision = %revision_id,
+                error = %error.message(),
+                "failed to load tree entry object"
+            );
             return Ok(RevisionContent::Unavailable {
                 revision_id: revision_id.clone(),
                 message: format!("load tree entry object: {}", error.message()),
@@ -179,6 +208,13 @@ pub fn load_revision_content(
     let blob = match object.peel_to_blob() {
         Ok(blob) => blob,
         Err(error) => {
+            warn!(
+                target: "vestigia.core.git",
+                path = %repo_relative_path.as_path().display(),
+                revision = %revision_id,
+                error = %error.message(),
+                "failed to peel tree entry object to blob"
+            );
             return Ok(RevisionContent::Unavailable {
                 revision_id: revision_id.clone(),
                 message: format!("peel blob: {}", error.message()),
@@ -187,21 +223,28 @@ pub fn load_revision_content(
     };
 
     if blob.is_binary() {
+        debug!(target: "vestigia.core.git", revision = %revision_id, "loaded binary revision content");
         return Ok(RevisionContent::Binary {
             revision_id: revision_id.clone(),
         });
     }
 
     match std::str::from_utf8(blob.content()) {
-        Ok(content) => Ok(RevisionContent::Text {
-            revision_id: revision_id.clone(),
-            content: content.to_owned(),
-            encoding: Some("utf-8".to_owned()),
-        }),
-        Err(_) => Ok(RevisionContent::UnsupportedEncoding {
-            revision_id: revision_id.clone(),
-            encoding: None,
-        }),
+        Ok(content) => {
+            debug!(target: "vestigia.core.git", revision = %revision_id, bytes = blob.content().len(), "loaded text revision content");
+            Ok(RevisionContent::Text {
+                revision_id: revision_id.clone(),
+                content: content.to_owned(),
+                encoding: Some("utf-8".to_owned()),
+            })
+        }
+        Err(_) => {
+            warn!(target: "vestigia.core.git", revision = %revision_id, bytes = blob.content().len(), "unsupported revision content encoding");
+            Ok(RevisionContent::UnsupportedEncoding {
+                revision_id: revision_id.clone(),
+                encoding: None,
+            })
+        }
     }
 }
 
@@ -277,6 +320,13 @@ fn stream_git_history(
     mut on_record: impl FnMut(GitLogRecord) -> DomainResult<()>,
 ) -> DomainResult<()> {
     let format = "%H%x00%h%x00%an%x00%ae%x00%at%x00%ai%x00%ct%x00%cI%x00%s%x00".to_string();
+    debug!(
+        target: "vestigia.core.git",
+        mode = ?mode,
+        repo_root = %repo_root.as_path().display(),
+        path = %repo_relative_path.as_path().display(),
+        "spawning git log"
+    );
     let output = Command::new("git")
         .current_dir(repo_root.as_path())
         .arg("log")
@@ -318,6 +368,7 @@ fn consume_git_log_output(
     let mut stdout = BufReader::new(stdout);
     let mut record = Vec::new();
     let field_count = 9;
+    let mut records = 0usize;
 
     loop {
         record.clear();
@@ -374,6 +425,7 @@ fn consume_git_log_output(
         }
 
         on_record(GitLogRecord::parse(raw_record)?)?;
+        records += 1;
     }
 
     let mut stderr_buffer = String::new();
@@ -390,12 +442,14 @@ fn consume_git_log_output(
     })?;
 
     if !status.success() {
+        error!(target: "vestigia.core.git", stderr = %stderr_buffer.trim(), "git log exited unsuccessfully");
         return Err(DomainError::Git {
             operation: "git log",
             message: stderr_buffer.trim().to_owned(),
         });
     }
 
+    debug!(target: "vestigia.core.git", records, "consumed git log output");
     Ok(())
 }
 

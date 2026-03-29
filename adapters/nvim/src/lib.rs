@@ -112,7 +112,7 @@ fn open_vestigia(args: CommandArgs) -> Result<()> {
 fn run_vestigia(mode: HistoryMode) -> AdapterResult<()> {
     let current = Buffer::current();
     let file_path = current_file_path(&current)?;
-    info!(mode = render_mode(mode), file = %file_path.display(), "opening Vestigia session");
+    info!(target: "vestigia.nvim.session", mode = render_mode(mode), file = %file_path.display(), "opening Vestigia session");
     let engine = Engine::open_repository(&file_path).map_err(AdapterError::Domain)?;
     let (_, repo_relative_path) = engine
         .resolve_file_path(&file_path)
@@ -157,6 +157,7 @@ fn open_previous_revision(_args: CommandArgs) -> Result<()> {
         Some(index) if index + 1 < state.revisions.len() => {
             state.current_index = Some(index + 1);
             debug!(
+                target: "vestigia.nvim.navigation",
                 index = state.current_index.unwrap_or_default(),
                 "moved to older revision"
             );
@@ -182,6 +183,7 @@ fn open_next_revision(_args: CommandArgs) -> Result<()> {
         Some(index) if index > 0 => {
             state.current_index = Some(index - 1);
             debug!(
+                target: "vestigia.nvim.navigation",
                 index = state.current_index.unwrap_or_default(),
                 "moved to newer revision"
             );
@@ -210,7 +212,7 @@ fn show_revision_metadata(_args: CommandArgs) -> Result<()> {
         }
 
         let metadata = open_or_reuse_metadata_window(state)?;
-        debug!("opened or focused metadata buffer");
+        debug!(target: "vestigia.nvim.metadata", "opened or focused metadata buffer");
         render_metadata(state, &metadata)
     }) {
         api::err_writeln(&render_adapter_error(&error));
@@ -234,14 +236,14 @@ fn run_history_worker(
     update_tx: Sender<WorkerMessage>,
     update_handle: AsyncHandle,
 ) {
-    info!(mode = render_mode(mode), file = %file_path.display(), "starting history worker");
+    info!(target: "vestigia.nvim.worker", mode = render_mode(mode), file = %file_path.display(), "starting history worker");
     let mut batch = Vec::with_capacity(HISTORY_BATCH_SIZE);
     let mut sent_first_revision = false;
 
     let result = engine.scan_file_history_with_mode(&file_path, mode, |revision| {
         if !sent_first_revision {
             sent_first_revision = true;
-            debug!(revision = %revision.id, "sending first revision");
+            debug!(target: "vestigia.nvim.worker", revision = %revision.id, "sending first revision");
             send_worker_message(
                 &update_tx,
                 &update_handle,
@@ -263,11 +265,11 @@ fn run_history_worker(
 
     match result {
         Ok(_) => {
-            info!("history worker finished successfully");
+            info!(target: "vestigia.nvim.worker", "history worker finished successfully");
             send_worker_message(&update_tx, &update_handle, WorkerMessage::Finished)
         }
         Err(error) => {
-            error!(error = %render_domain_error(&error), "history worker failed");
+            error!(target: "vestigia.nvim.worker", error = %render_domain_error(&error), "history worker failed");
             send_worker_message(
                 &update_tx,
                 &update_handle,
@@ -298,7 +300,7 @@ fn send_worker_message(
     if update_tx.send(message).is_ok() {
         let _ = update_handle.send();
     } else {
-        warn!("failed to send worker message to UI thread");
+        warn!(target: "vestigia.nvim.worker", "failed to send worker message to UI thread");
     }
 }
 
@@ -325,26 +327,30 @@ fn process_worker_updates() -> AdapterResult<()> {
                     state.current_index = Some(0);
                 }
 
-                debug!(count = revisions.len(), "received revision batch");
+                debug!(target: "vestigia.nvim.worker", count = revisions.len(), "received revision batch");
                 state.revisions.append(&mut revisions);
                 changed = true;
             }
             Ok(WorkerMessage::Finished) => {
-                info!(loaded = state.revisions.len(), "history loading completed");
+                info!(target: "vestigia.nvim.worker", loaded = state.revisions.len(), "history loading completed");
                 state.loading_complete = true;
                 changed = true;
             }
             Ok(WorkerMessage::Failed(message)) => {
-                error!(%message, "history loading failed");
+                error!(target: "vestigia.nvim.worker", %message, "history loading failed");
                 state.loading_complete = true;
                 state.loading_error = Some(message);
                 changed = true;
             }
             Err(TryRecvError::Empty) => break,
             Err(TryRecvError::Disconnected) => {
-                warn!("history worker channel disconnected");
-                state.loading_complete = true;
-                changed = true;
+                if !state.loading_complete {
+                    warn!(target: "vestigia.nvim.worker", "history worker channel disconnected before completion");
+                    state.loading_complete = true;
+                    changed = true;
+                } else {
+                    debug!(target: "vestigia.nvim.worker", "history worker channel disconnected after completion");
+                }
                 break;
             }
         }
@@ -503,7 +509,7 @@ fn current_content<'a>(
             .engine
             .load_revision_content(&state.repo_relative_path, &revision.id)
             .map_err(AdapterError::Domain)?;
-        debug!(revision = %revision.id, "loaded revision content");
+        debug!(target: "vestigia.nvim.content", revision = %revision.id, "loaded revision content");
         state.content_cache.insert(revision.id.clone(), content);
     }
 
@@ -809,7 +815,7 @@ fn initialize_tracing() {
     let _ = tracing_subscriber::fmt()
         .with_writer(non_blocking)
         .with_ansi(false)
-        .with_target(false)
+        .with_target(true)
         .with_max_level(tracing::Level::DEBUG)
         .try_init();
 }

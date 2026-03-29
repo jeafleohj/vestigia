@@ -8,3 +8,4 @@ license.workspace = true
 git2 = { version = "0.20.4", default-features = false, features = [
   "vendored-libgit2"
 ] }
+tracing.workspace = true
