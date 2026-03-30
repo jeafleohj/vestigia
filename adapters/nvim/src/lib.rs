@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env,
     path::PathBuf,
     sync::{
@@ -40,6 +40,14 @@ const HISTORY_MODE_NAMES: [&str; 3] = ["fast", "full-history", "full-history-no-
 
 enum WorkerMessage {
     Batch(Vec<Revision>),
+    ContentLoaded {
+        revision_id: RevisionId,
+        content: RevisionContent,
+    },
+    ContentFailed {
+        revision_id: RevisionId,
+        message: String,
+    },
     Finished,
     Failed(String),
 }
@@ -60,8 +68,12 @@ struct VestigiaSession {
     revisions: Vec<Revision>,
     current_index: Option<usize>,
     content_cache: HashMap<RevisionId, RevisionContent>,
+    content_loading: HashSet<RevisionId>,
+    content_errors: HashMap<RevisionId, String>,
     loading_complete: bool,
     loading_error: Option<String>,
+    update_tx: Sender<WorkerMessage>,
+    update_handle: AsyncHandle,
     update_rx: Receiver<WorkerMessage>,
 }
 
@@ -145,8 +157,12 @@ fn run_vestigia(mode: HistoryMode) -> AdapterResult<()> {
         revisions: Vec::new(),
         current_index: None,
         content_cache: HashMap::new(),
+        content_loading: HashSet::new(),
+        content_errors: HashMap::new(),
         loading_complete: false,
         loading_error: None,
+        update_tx: update_tx.clone(),
+        update_handle: handle.clone(),
         update_rx,
     })?;
     render_session()?;
@@ -335,6 +351,25 @@ fn process_worker_updates() -> AdapterResult<()> {
                 state.revisions.append(&mut revisions);
                 changed = true;
             }
+            Ok(WorkerMessage::ContentLoaded {
+                revision_id,
+                content,
+            }) => {
+                debug!(target: "vestigia.nvim.content", revision = %revision_id, "received loaded revision content");
+                state.content_loading.remove(&revision_id);
+                state.content_errors.remove(&revision_id);
+                state.content_cache.insert(revision_id, content);
+                changed = true;
+            }
+            Ok(WorkerMessage::ContentFailed {
+                revision_id,
+                message,
+            }) => {
+                error!(target: "vestigia.nvim.content", revision = %revision_id, %message, "failed to load revision content");
+                state.content_loading.remove(&revision_id);
+                state.content_errors.insert(revision_id, message);
+                changed = true;
+            }
             Ok(WorkerMessage::Finished) => {
                 info!(target: "vestigia.nvim.worker", loaded = state.revisions.len(), "history loading completed");
                 state.loading_complete = true;
@@ -393,7 +428,7 @@ fn render_state(state: &mut VestigiaSession) -> AdapterResult<()> {
 
     let (lines, title, buffer_name) = match current_revision(state).cloned() {
         Some(revision) => {
-            let lines = render_revision_content(current_content(state, &revision)?);
+            let lines = render_revision_lines(state, &revision);
             let title = format!(
                 "Vestigia [{}] [{} / {}] {} {} {}",
                 render_mode(state.mode),
@@ -483,25 +518,56 @@ fn render_metadata(state: &VestigiaSession, metadata: &Buffer) -> AdapterResult<
     Ok(())
 }
 
-fn current_content<'a>(
-    state: &'a mut VestigiaSession,
-    revision: &Revision,
-) -> AdapterResult<&'a RevisionContent> {
-    if !state.content_cache.contains_key(&revision.id) {
-        let content = state
-            .engine
-            .load_revision_content(&state.repo_relative_path, &revision.id)
-            .map_err(AdapterError::Domain)?;
-        debug!(target: "vestigia.nvim.content", revision = %revision.id, "loaded revision content");
-        state.content_cache.insert(revision.id.clone(), content);
+fn render_revision_lines(state: &mut VestigiaSession, revision: &Revision) -> Vec<String> {
+    if let Some(content) = state.content_cache.get(&revision.id) {
+        return render_revision_content(content);
     }
 
-    state.content_cache.get(&revision.id).ok_or_else(|| {
-        AdapterError::Nvim(format!(
-            "failed to cache content for revision {}",
-            revision.id
-        ))
-    })
+    if let Some(message) = state.content_errors.get(&revision.id) {
+        return vec![
+            "<content unavailable>".to_owned(),
+            String::new(),
+            message.clone(),
+        ];
+    }
+
+    enqueue_content_load(state, revision);
+
+    vec![
+        "<loading revision content...>".to_owned(),
+        String::new(),
+        "Vestigia is resolving historical content in the background.".to_owned(),
+    ]
+}
+
+fn enqueue_content_load(state: &mut VestigiaSession, revision: &Revision) {
+    if state.content_loading.contains(&revision.id) {
+        return;
+    }
+
+    let revision_id = revision.id.clone();
+    let engine = state.engine.clone();
+    let repo_relative_path = state.repo_relative_path.clone();
+    let update_tx = state.update_tx.clone();
+    let update_handle = state.update_handle.clone();
+
+    state.content_loading.insert(revision_id.clone());
+    debug!(target: "vestigia.nvim.content", revision = %revision_id, "queueing revision content load");
+
+    let _ = thread::spawn(move || {
+        let message = match engine.load_revision_content(&repo_relative_path, &revision_id) {
+            Ok(content) => WorkerMessage::ContentLoaded {
+                revision_id,
+                content,
+            },
+            Err(error) => WorkerMessage::ContentFailed {
+                revision_id,
+                message: render_domain_error(&error),
+            },
+        };
+
+        send_worker_message(&update_tx, &update_handle, message);
+    });
 }
 
 fn current_revision(state: &VestigiaSession) -> Option<&Revision> {
