@@ -25,6 +25,56 @@ pub enum HistoryMode {
     FullHistoryNoMerges,
 }
 
+#[cfg(test)]
+mod fallback_tests {
+    use super::{git_object_spec, is_missing_git_object_message, revision_content_from_bytes};
+    use crate::{content::RevisionContent, paths::RepoRelativePath, revision::RevisionId};
+
+    #[test]
+    fn missing_git_object_messages_are_detected() {
+        assert!(is_missing_git_object_message(
+            "object not found - no match for id (deadbeef)"
+        ));
+        assert!(is_missing_git_object_message(
+            "missing blob object 'abc123'"
+        ));
+        assert!(!is_missing_git_object_message(
+            "path does not exist in revision"
+        ));
+    }
+
+    #[test]
+    fn git_object_spec_normalizes_separators() {
+        let revision_id = RevisionId::new("abc123").unwrap();
+        let path = RepoRelativePath::new(r"docs\guide.md").unwrap();
+
+        assert_eq!(git_object_spec(&revision_id, &path), "abc123:docs/guide.md");
+    }
+
+    #[test]
+    fn revision_content_from_bytes_recognizes_text() {
+        let revision_id = RevisionId::new("abc123").unwrap();
+        let content = revision_content_from_bytes(&revision_id, b"hello\n").unwrap();
+
+        assert_eq!(
+            content,
+            RevisionContent::Text {
+                revision_id,
+                content: "hello\n".to_owned(),
+                encoding: Some("utf-8".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn revision_content_from_bytes_recognizes_binary() {
+        let revision_id = RevisionId::new("abc123").unwrap();
+        let content = revision_content_from_bytes(&revision_id, b"\0binary").unwrap();
+
+        assert_eq!(content, RevisionContent::Binary { revision_id });
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryScanProfile {
     pub commits_scanned: usize,
@@ -199,6 +249,14 @@ pub fn load_revision_content(
                 error = %error.message(),
                 "failed to load tree entry object"
             );
+            if is_missing_git_object_message(error.message()) {
+                return load_revision_content_with_git_cli(
+                    repo_root,
+                    repo_relative_path,
+                    revision_id,
+                );
+            }
+
             return Ok(RevisionContent::Unavailable {
                 revision_id: revision_id.clone(),
                 message: format!("load tree entry object: {}", error.message()),
@@ -215,6 +273,14 @@ pub fn load_revision_content(
                 error = %error.message(),
                 "failed to peel tree entry object to blob"
             );
+            if is_missing_git_object_message(error.message()) {
+                return load_revision_content_with_git_cli(
+                    repo_root,
+                    repo_relative_path,
+                    revision_id,
+                );
+            }
+
             return Ok(RevisionContent::Unavailable {
                 revision_id: revision_id.clone(),
                 message: format!("peel blob: {}", error.message()),
@@ -246,6 +312,98 @@ pub fn load_revision_content(
             })
         }
     }
+}
+
+fn load_revision_content_with_git_cli(
+    repo_root: &RepositoryRoot,
+    repo_relative_path: &RepoRelativePath,
+    revision_id: &RevisionId,
+) -> DomainResult<RevisionContent> {
+    debug!(
+        target: "vestigia.core.git",
+        path = %repo_relative_path.as_path().display(),
+        revision = %revision_id,
+        "falling back to git show for revision content"
+    );
+
+    let output = Command::new("git")
+        .current_dir(repo_root.as_path())
+        .arg("show")
+        .arg("--no-textconv")
+        .arg(git_object_spec(revision_id, repo_relative_path))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| DomainError::Git {
+            operation: "run git show",
+            message: error.to_string(),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let message = if is_missing_git_object_message(&stderr) {
+            "missing git object locally".to_owned()
+        } else {
+            format!("git show: {stderr}")
+        };
+
+        warn!(
+            target: "vestigia.core.git",
+            path = %repo_relative_path.as_path().display(),
+            revision = %revision_id,
+            stderr = %stderr,
+            "git show fallback failed"
+        );
+
+        return Ok(RevisionContent::Unavailable {
+            revision_id: revision_id.clone(),
+            message,
+        });
+    }
+
+    revision_content_from_bytes(revision_id, &output.stdout)
+}
+
+fn revision_content_from_bytes(
+    revision_id: &RevisionId,
+    bytes: &[u8],
+) -> DomainResult<RevisionContent> {
+    if bytes.contains(&0) {
+        return Ok(RevisionContent::Binary {
+            revision_id: revision_id.clone(),
+        });
+    }
+
+    match std::str::from_utf8(bytes) {
+        Ok(content) => Ok(RevisionContent::Text {
+            revision_id: revision_id.clone(),
+            content: content.to_owned(),
+            encoding: Some("utf-8".to_owned()),
+        }),
+        Err(_) => Ok(RevisionContent::UnsupportedEncoding {
+            revision_id: revision_id.clone(),
+            encoding: None,
+        }),
+    }
+}
+
+fn git_object_spec(revision_id: &RevisionId, repo_relative_path: &RepoRelativePath) -> String {
+    let path = repo_relative_path
+        .as_path()
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    format!("{}:{}", revision_id, path)
+}
+
+fn is_missing_git_object_message(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+
+    message.contains("object not found")
+        || message.contains("missing blob object")
+        || message.contains("bad object")
+        || message.contains("unable to read")
+        || message.contains("missing git object locally")
 }
 
 const FIELD_SEPARATOR: u8 = b'\0';
