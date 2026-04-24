@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["adapters/nvim", "cli", "core"]
+members = ["crates/cli", "crates/core", "crates/nvim"]
 
 [workspace.package]
 version = "0.1.0"
