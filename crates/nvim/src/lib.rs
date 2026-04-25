@@ -11,7 +11,7 @@ use std::{
 
 use nvim_oxi::{
     self as oxi,
-    api::{opts::OptionOptsBuilder, set_option_value},
+    api::{get_option_value, opts::OptionOptsBuilder, set_option_value},
 };
 use nvim_oxi::{libuv::AsyncHandle, schedule};
 use oxi::{
@@ -63,6 +63,7 @@ struct VestigiaSession {
     mode: HistoryMode,
     target_file: PathBuf,
     repo_relative_path: RepoRelativePath,
+    filetype: String,
     scratch: Buffer,
     metadata: Option<Buffer>,
     revisions: Vec<Revision>,
@@ -127,6 +128,7 @@ fn open_vestigia(args: CommandArgs) -> Result<()> {
 fn run_vestigia(mode: HistoryMode) -> AdapterResult<()> {
     let current = Buffer::current();
     let file_path = current_file_path(&current)?;
+    let filetype = current_filetype(&current)?;
     info!(target: "vestigia.nvim.session", mode = render_mode(mode), file = %file_path.display(), "opening Vestigia session");
     let engine = Engine::open_repository(&file_path).map_err(AdapterError::Domain)?;
     let (_, repo_relative_path) = engine
@@ -152,6 +154,7 @@ fn run_vestigia(mode: HistoryMode) -> AdapterResult<()> {
         mode,
         target_file: file_path.clone(),
         repo_relative_path,
+        filetype,
         scratch,
         metadata,
         revisions: Vec::new(),
@@ -425,6 +428,7 @@ fn render_state(state: &mut VestigiaSession) -> AdapterResult<()> {
     }
 
     let scratch = state.scratch.clone();
+    apply_buffer_filetype(&scratch, &state.filetype)?;
 
     let (lines, title, buffer_name) = match current_revision(state).cloned() {
         Some(revision) => {
@@ -760,6 +764,16 @@ fn render_buffer_content(
     buffer.clone().set_name(buffer_name).map_err(nvim_error)?;
 
     Ok(())
+}
+
+fn current_filetype(buffer: &Buffer) -> AdapterResult<String> {
+    let opts = OptionOptsBuilder::default().buffer(buffer.clone()).build();
+    get_option_value("filetype", &opts).map_err(nvim_error)
+}
+
+fn apply_buffer_filetype(buffer: &Buffer, filetype: &str) -> AdapterResult<()> {
+    let opts = OptionOptsBuilder::default().buffer(buffer.clone()).build();
+    set_option_value("filetype", filetype, &opts).map_err(nvim_error)
 }
 
 fn update_window_winbar(buffer: &Buffer, title: &str) -> AdapterResult<()> {
