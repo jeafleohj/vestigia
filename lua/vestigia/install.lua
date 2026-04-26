@@ -40,11 +40,10 @@ local function target_info()
   end
 
   local extension = is_mac and "dylib" or "so"
-
-  local os_name = is_mac and "darwin" or "linux"
+  local target = is_mac and "apple-darwin" or "unknown-linux-gnu"
 
   return {
-    asset = string.format("vestigia-nvim-%s-%s.%s", arch, os_name, extension),
+    asset = string.format("vestigia-nvim-%s-%s.tar.gz", arch, target),
     library = string.format("libvestigia_nvim.%s", extension),
   }
 end
@@ -86,7 +85,8 @@ function M.install(opts)
   local root = plugin_root()
   local lib_dir = join_path(root, "lib")
   local destination = join_path(lib_dir, info.library)
-  local temporary = destination .. ".tmp"
+  local archive = join_path(lib_dir, info.asset)
+  local temporary = archive .. ".tmp"
 
   if vim.fn.filereadable(destination) == 1 and not opts.force then
     return destination
@@ -105,6 +105,8 @@ function M.install(opts)
     "curl",
     "--fail",
     "--location",
+    "--silent",
+    "--show-error",
     "--retry",
     "3",
     "--output",
@@ -112,7 +114,16 @@ function M.install(opts)
     url,
   })
 
-  vim.fn.rename(temporary, destination)
+  vim.fn.rename(temporary, archive)
+
+  run({
+    "tar",
+    "-xzf",
+    archive,
+    "-C",
+    lib_dir,
+    info.library,
+  })
 
   return destination
 end
