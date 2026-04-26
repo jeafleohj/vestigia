@@ -125,6 +125,8 @@ function M.install(opts)
     info.library,
   })
 
+  vim.fn.delete(archive)
+
   return destination
 end
 
