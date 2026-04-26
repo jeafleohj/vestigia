@@ -17,13 +17,15 @@ Install from GitHub:
 {
   "jeafleohj/vestigia",
   cmd = { "Vestigia", "VestigiaPrev", "VestigiaNext", "VestigiaMeta" },
-  build = "cargo build --release -p vestigia-nvim",
+  build = function()
+    require("vestigia.install").install()
+  end,
   config = function()
     require("vestigia").setup()
   end,
 }
 ```
 
-The Neovim adapter is a native plugin. On macOS, the `build` step compiles
-`target/release/libvestigia_nvim.dylib`, and the Lua loader in
-`lua/vestigia.lua` loads that library into Neovim.
+The Neovim adapter is a native plugin. The `build` step downloads a prebuilt
+native library into `lib/`, and the Lua loader in `lua/vestigia.lua` loads that
+library into Neovim.

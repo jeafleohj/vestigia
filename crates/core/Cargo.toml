@@ -1,6 +1,6 @@
 [package]
 name = "vestigia-core"
-version = "0.1.0"
+version = "0.0.0"
 edition = "2024"
 license.workspace = true
 
@@ -8,4 +8,5 @@ license.workspace = true
 git2 = { version = "0.20.4", default-features = false, features = [
   "vendored-libgit2"
 ] }
+libz-sys = { version = "1.1.28", features = ["static"] }
 tracing.workspace = true

@@ -1,2 +1,7 @@
 [target.aarch64-apple-darwin]
-rustflags = ["-C", "link-arg=-Wl,-undefined,dynamic_lookup"]
+rustflags = [
+  "-C",
+  "link-arg=-Wl,-undefined,dynamic_lookup",
+  "-C",
+  "link-arg=-Wl,-install_name,@rpath/libvestigia_nvim.dylib",
+]

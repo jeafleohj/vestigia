@@ -3,7 +3,6 @@ local M = {}
 local loaded = false
 
 local LIBRARY_ENTRYPOINT = "luaopen_vestigia_nvim"
-local LIBRARY_NAME = "libvestigia_nvim.dylib"
 
 local function plugin_root()
   local source = debug.getinfo(1, "S").source
@@ -16,12 +15,25 @@ local function join_path(...)
   return table.concat({ ... }, "/")
 end
 
+local function library_name()
+  if vim.fn.has("macunix") == 1 then
+    return "libvestigia_nvim.dylib"
+  end
+
+  if vim.fn.has("unix") == 1 then
+    return "libvestigia_nvim.so"
+  end
+
+  error("Vestigia does not support this platform yet")
+end
+
 local function library_candidates()
   local root = plugin_root()
+  local name = library_name()
 
   return {
-    join_path(root, "lib", LIBRARY_NAME),
-    join_path(root, "target", "release", LIBRARY_NAME),
+    join_path(root, "lib", name),
+    join_path(root, "target", "release", name),
   }
 end
 
@@ -40,7 +52,8 @@ local function format_missing_library_error(candidates)
     "Vestigia native library not found.",
     "Searched:",
     table.concat(candidates, "\n"),
-    "Build it with: cargo build --release -p vestigia-nvim",
+    "Install it with: require('vestigia.install').install()",
+    "Or build it with: cargo build --release -p vestigia-nvim",
   }, "\n")
 end
 
