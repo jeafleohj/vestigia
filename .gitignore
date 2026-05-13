@@ -18,6 +18,13 @@ target
 *.swp
 *~
 
+# ignore Nix derivation results
+result
+
+# nix related
+.direnv
+.envrc
+
 # cli tools
 CLAUDE.md
 .claude/
