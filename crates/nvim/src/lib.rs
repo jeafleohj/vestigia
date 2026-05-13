@@ -9,6 +9,8 @@ use std::{
     thread,
 };
 
+mod highlight;
+
 use nvim_oxi::{
     self as oxi,
     api::{get_option_value, opts::OptionOptsBuilder, set_option_value},
@@ -32,8 +34,10 @@ use vestigia_core::{
 type AdapterResult<T> = std::result::Result<T, AdapterError>;
 
 const HISTORY_BATCH_SIZE: usize = 32;
+const CHANGED_LINE_HIGHLIGHT: &str = "VestigiaChangedLine";
 
 static ACTIVE_SESSION: OnceLock<Mutex<Option<VestigiaSession>>> = OnceLock::new();
+static HIGHLIGHT_NAMESPACE: OnceLock<u32> = OnceLock::new();
 static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 const HISTORY_MODE_NAMES: [&str; 3] = ["fast", "full-history", "full-history-no-merges"];
@@ -71,6 +75,7 @@ struct VestigiaSession {
     content_cache: HashMap<RevisionId, RevisionContent>,
     content_loading: HashSet<RevisionId>,
     content_errors: HashMap<RevisionId, String>,
+    highlight_changes: bool,
     loading_complete: bool,
     loading_error: Option<String>,
     update_tx: Sender<WorkerMessage>,
@@ -94,16 +99,25 @@ fn vestigia_nvim() -> Result<()> {
     let meta_opts = CreateCommandOptsBuilder::default()
         .desc("Show metadata for the active Vestigia revision")
         .build();
+    let toggle_highlights_opts = CreateCommandOptsBuilder::default()
+        .desc("Toggle changed-line highlights for the active Vestigia revision")
+        .build();
     let open_log_opts = CreateCommandOptsBuilder::default()
         .desc("Open the Vestigia Neovim adapter log")
         .build();
 
     initialize_tracing();
+    define_highlights()?;
 
     api::create_user_command("Vestigia", open_vestigia, &open_opts)?;
     api::create_user_command("VestigiaPrev", open_previous_revision, &prev_opts)?;
     api::create_user_command("VestigiaNext", open_next_revision, &next_opts)?;
     api::create_user_command("VestigiaMeta", show_revision_metadata, &meta_opts)?;
+    api::create_user_command(
+        "VestigiaToggleHighlights",
+        toggle_changed_line_highlights,
+        &toggle_highlights_opts,
+    )?;
     api::create_user_command("VestigiaOpenLog", open_vestigia_log, &open_log_opts)?;
 
     Ok(())
@@ -162,6 +176,7 @@ fn run_vestigia(mode: HistoryMode) -> AdapterResult<()> {
         content_cache: HashMap::new(),
         content_loading: HashSet::new(),
         content_errors: HashMap::new(),
+        highlight_changes: false,
         loading_complete: false,
         loading_error: None,
         update_tx: update_tx.clone(),
@@ -237,6 +252,20 @@ fn show_revision_metadata(_args: CommandArgs) -> Result<()> {
         let metadata = open_or_reuse_metadata_window(state)?;
         debug!(target: "vestigia.nvim.metadata", "opened or focused metadata buffer");
         render_metadata(state, &metadata)
+    }) {
+        api::err_writeln(&render_adapter_error(&error));
+    }
+
+    Ok(())
+}
+
+fn toggle_changed_line_highlights(_args: CommandArgs) -> Result<()> {
+    if let Err(error) = with_active_session(|state| {
+        state.highlight_changes = !state.highlight_changes;
+        if state.highlight_changes {
+            enqueue_newer_revision_content(state);
+        }
+        render_state(state)
     }) {
         api::err_writeln(&render_adapter_error(&error));
     }
@@ -434,8 +463,13 @@ fn render_state(state: &mut VestigiaSession) -> AdapterResult<()> {
         Some(revision) => {
             let lines = render_revision_lines(state, &revision);
             let title = format!(
-                "Vestigia [{}] [{} / {}] {} {} {}",
+                "Vestigia [{}]{} [{} / {}] {} {} {}",
                 render_mode(state.mode),
+                if state.highlight_changes {
+                    " [highlights]"
+                } else {
+                    ""
+                },
                 display_revision_position(&revision),
                 history_status_label(state),
                 revision.short_id,
@@ -471,6 +505,7 @@ fn render_state(state: &mut VestigiaSession) -> AdapterResult<()> {
     };
 
     render_buffer_content(&scratch, lines, buffer_name)?;
+    apply_changed_line_highlights(state, &scratch)?;
     update_window_winbar(&scratch, &title)?;
 
     if let Some(metadata) = state
@@ -660,6 +695,8 @@ fn open_scratch_window() -> AdapterResult<Buffer> {
     api::command("nnoremap <silent> <buffer> [h <Cmd>VestigiaPrev<CR>").map_err(nvim_error)?;
     api::command("nnoremap <silent> <buffer> ]h <Cmd>VestigiaNext<CR>").map_err(nvim_error)?;
     api::command("nnoremap <silent> <buffer> gm <Cmd>VestigiaMeta<CR>").map_err(nvim_error)?;
+    api::command("nnoremap <silent> <buffer> gh <Cmd>VestigiaToggleHighlights<CR>")
+        .map_err(nvim_error)?;
     api::command("nnoremap <silent> <buffer> q <Cmd>close<CR>").map_err(nvim_error)?;
     Ok(Buffer::current())
 }
@@ -764,6 +801,88 @@ fn render_buffer_content(
     buffer.clone().set_name(buffer_name).map_err(nvim_error)?;
 
     Ok(())
+}
+
+fn apply_changed_line_highlights(
+    state: &mut VestigiaSession,
+    buffer: &Buffer,
+) -> AdapterResult<()> {
+    let namespace = highlight_namespace();
+    let mut buffer = buffer.clone();
+    buffer.clear_namespace(namespace, ..).map_err(nvim_error)?;
+
+    if !state.highlight_changes {
+        return Ok(());
+    }
+
+    let Some(current_index) = state.current_index else {
+        return Ok(());
+    };
+
+    if current_index == 0 {
+        return Ok(());
+    }
+
+    let current_revision = state.revisions[current_index].clone();
+    let newer_revision = state.revisions[current_index - 1].clone();
+
+    let Some(current_content) = state.content_cache.get(&current_revision.id) else {
+        return Ok(());
+    };
+
+    let Some(newer_content) = state.content_cache.get(&newer_revision.id) else {
+        enqueue_content_load(state, &newer_revision);
+        return Ok(());
+    };
+
+    let Some(current_text) = revision_text(current_content) else {
+        return Ok(());
+    };
+
+    let Some(newer_text) = revision_text(newer_content) else {
+        return Ok(());
+    };
+
+    for line in highlight::changed_line_indexes(current_text, newer_text) {
+        buffer
+            .add_highlight(namespace, CHANGED_LINE_HIGHLIGHT, line, ..)
+            .map_err(nvim_error)?;
+    }
+
+    Ok(())
+}
+
+fn revision_text(content: &RevisionContent) -> Option<&str> {
+    match content {
+        RevisionContent::Text { content, .. } => Some(content.as_str()),
+        _ => None,
+    }
+}
+
+fn highlight_namespace() -> u32 {
+    *HIGHLIGHT_NAMESPACE.get_or_init(|| api::create_namespace("vestigia-changed-lines"))
+}
+
+fn define_highlights() -> Result<()> {
+    Ok(api::command(
+        "highlight default link VestigiaChangedLine DiffChange",
+    )?)
+}
+
+fn enqueue_newer_revision_content(state: &mut VestigiaSession) {
+    let Some(current_index) = state.current_index else {
+        return;
+    };
+
+    if current_index == 0 {
+        return;
+    }
+
+    let newer_revision = state.revisions[current_index - 1].clone();
+
+    if !state.content_cache.contains_key(&newer_revision.id) {
+        enqueue_content_load(state, &newer_revision);
+    }
 }
 
 fn current_filetype(buffer: &Buffer) -> AdapterResult<String> {
